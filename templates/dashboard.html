@@ -1,0 +1,207 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center">
+                <h2 class="page-title mb-0">Welcome, {{ username }}!</h2>
+                <div>
+                    <span class="text-white-50"><i class="fas fa-clock me-1"></i> Last Login: {{ last_login }}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="row mb-4">
+        <div class="col-md-4">
+            <div class="card text-center h-100">
+                <div class="card-body">
+                    <i class="fas fa-file-alt fa-3x mb-3" style="color: #00c6fb;"></i>
+                    <h3 class="display-4 fw-bold">{{ datasets|length }}</h3>
+                    <p class="lead">Datasets</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-center h-100">
+                <div class="card-body">
+                    <i class="fas fa-chart-bar fa-3x mb-3" style="color: #00c6fb;"></i>
+                    <h3 class="display-4 fw-bold">{{ visualizations|length }}</h3>
+                    <p class="lead">Visualizations</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card text-center h-100">
+                <div class="card-body">
+                    <i class="fas fa-bolt fa-3x mb-3" style="color: #00c6fb;"></i>
+                    <h3 class="display-4 fw-bold">{{ datasets|length * 5 }}</h3>
+                    <p class="lead">Possible Visualizations</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Dashboard Card with Image -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body p-0">
+                    <div class="row g-0">
+                        <div class="col-md-7 p-4">
+                            <h3 class="mb-3">Ready to analyze your data?</h3>
+                            <p class="lead mb-4">Upload a new dataset to get started or explore your existing datasets below. Our intelligent system can automatically recommend the best visualizations based on your data structure.</p>
+                            <button type="button" class="btn btn-primary me-2" data-bs-toggle="modal" data-bs-target="#uploadModal">
+                                <i class="fas fa-upload me-2"></i>Upload New Dataset
+                            </button>
+                            {% if datasets %}
+                            <a href="{{ url_for('visualize', dataset_id=datasets[0].id) }}" class="btn btn-outline-secondary">
+                                <i class="fas fa-chart-line me-2"></i>Create Visualization
+                            </a>
+                            {% endif %}
+                        </div>
+                        <div class="col-md-5">
+                            <img src="{{ url_for('static', filename='images/dashboard.png') }}" class="img-fluid" alt="Data Visualization" style="width: 100%; height: 300px; object-fit: cover; border-radius: 0 15px 15px 0;">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Modal -->
+    <div class="modal fade" id="uploadModal" tabindex="-1" aria-labelledby="uploadModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content bg-dark text-white">
+                <div class="modal-header border-bottom border-secondary">
+                    <h5 class="modal-title" id="uploadModalLabel">Upload Dataset</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+                        <div class="mb-3">
+                            <label for="dataset_name" class="form-label">Dataset Name</label>
+                            <input type="text" class="form-control" id="dataset_name" name="dataset_name" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="file" class="form-label">File (CSV, Excel, or TXT)</label>
+                            <input type="file" class="form-control" id="file" name="file" accept=".csv,.xlsx,.txt" required>
+                            <small class="form-text text-muted">Max file size: 16MB</small>
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-upload me-2"></i>Upload Dataset
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Datasets and Visualizations Sections -->
+    <div class="row">
+        <!-- Datasets Section -->
+        <div class="col-lg-6 mb-4">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-database me-2"></i>Your Datasets</h5>
+                </div>
+                <div class="card-body p-0">
+                    {% if datasets %}
+                    <div class="list-group list-group-flush">
+                        {% for dataset in datasets %}
+                        <div class="list-group-item list-group-item-action" style="background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.1);">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <h6 class="mb-1">{{ dataset.name }}</h6>
+                                    <p class="small mb-0 text-white-50">
+                                        <span class="me-2"><i class="fas fa-file me-1"></i>{{ dataset.filename }}</span>
+                                        <span><i class="fas fa-calendar-alt me-1"></i>{{ dataset.upload_date.strftime('%d/%m/%Y') }}</span>
+                                    </p>
+                                </div>
+                                <div class="dropdown">
+                                    <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" id="datasetActions{{ dataset.id }}" data-bs-toggle="dropdown" aria-expanded="false">
+                                        Actions
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end" aria-labelledby="datasetActions{{ dataset.id }}">
+                                        <li><a class="dropdown-item" href="{{ url_for('preprocess', dataset_id=dataset.id) }}"><i class="fas fa-broom me-2"></i>Preprocess</a></li>
+                                        <li><a class="dropdown-item" href="{{ url_for('visualize', dataset_id=dataset.id) }}"><i class="fas fa-chart-bar me-2"></i>Visualize</a></li>
+                                        <li><a class="dropdown-item" href="{{ url_for('download_dataset', dataset_id=dataset.id) }}"><i class="fas fa-download me-2"></i>Download</a></li>
+                                        <li><hr class="dropdown-divider"></li>
+                                        <li><a class="dropdown-item text-danger" href="{{ url_for('delete_dataset', dataset_id=dataset.id) }}" onclick="return confirm('Are you sure you want to delete this dataset?');"><i class="fas fa-trash me-2"></i>Delete</a></li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="p-4 text-center">
+                        <i class="fas fa-database fa-3x mb-3" style="color: #00c6fb;"></i>
+                        <p class="mb-4">No datasets found</p>
+                        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#uploadModal">
+                            <i class="fas fa-upload me-2"></i>Upload Your First Dataset
+                        </button>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Visualizations Section -->
+        <div class="col-lg-6 mb-4">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h5 class="mb-0"><i class="fas fa-chart-pie me-2"></i>Your Visualizations</h5>
+                </div>
+                <div class="card-body p-0">
+                    {% if visualizations %}
+                    <div class="list-group list-group-flush">
+                        {% for viz in visualizations %}
+                        <div class="list-group-item list-group-item-action" style="background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.1);">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <h6 class="mb-1">{{ viz.name }}</h6>
+                                    <p class="small mb-0 text-white-50">
+                                        <span class="me-2"><i class="fas fa-chart-line me-1"></i>{{ viz.chart_type|capitalize }}</span>
+                                        <span><i class="fas fa-calendar-alt me-1"></i>{{ viz.created_date.strftime('%d/%m/%Y') }}</span>
+                                    </p>
+                                </div>
+                                <div class="dropdown">
+                                    <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" id="vizActions{{ viz.id }}" data-bs-toggle="dropdown" aria-expanded="false">
+                                        Actions
+                                    </button>
+                                    <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end" aria-labelledby="vizActions{{ viz.id }}">
+                                        <li><a class="dropdown-item" href="{{ url_for('view_visualization', viz_id=viz.id) }}"><i class="fas fa-eye me-2"></i>View</a></li>
+                                        <li><a class="dropdown-item" href="{{ url_for('edit_visualization', viz_id=viz.id) }}"><i class="fas fa-edit me-2"></i>Edit</a></li>
+                                        <li><a class="dropdown-item" href="{{ url_for('export_visualization', viz_id=viz.id) }}"><i class="fas fa-file-export me-2"></i>Export</a></li>
+                                        <li><hr class="dropdown-divider"></li>
+                                        <li><a class="dropdown-item text-danger" href="{{ url_for('delete_visualization', viz_id=viz.id) }}" onclick="return confirm('Are you sure you want to delete this visualization?');"><i class="fas fa-trash me-2"></i>Delete</a></li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="p-4 text-center">
+                        <i class="fas fa-chart-pie fa-3x mb-3" style="color: #00c6fb;"></i>
+                        <p class="mb-4">No visualizations found</p>
+                        {% if datasets %}
+                        <a href="{{ url_for('visualize', dataset_id=datasets[0].id) }}" class="btn btn-primary">
+                            <i class="fas fa-chart-bar me-2"></i>Create Your First Visualization
+                        </a>
+                        {% else %}
+                        <p>Upload a dataset to start creating visualizations</p>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %} 
