@@ -206,8 +206,8 @@
 
                                 <div class="col-md-4">
                                     <label class="form-label">Y-Axis</label>
-                                    <select class="form-select" name="y_axis" required>
-                                        <option value="">Select Column</option>
+                                    <select class="form-select" name="y_axis">
+                                        <option value="">None</option>
                                         {% for column in columns %}
                                             <option value="{{ column }}" {% if column == viz.y_axis %}selected{% endif %}>
                                                 {{ column }}

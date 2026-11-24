@@ -1,99 +1,58 @@
-## Data Visualization App (Flask)
+# Data Visualization App (Flask)
 
-A Flask web application to upload tabular datasets (CSV/XLSX/TXT), perform quick preprocessing, get smart chart recommendations, create and save visualizations, and export them as PNGs. Includes user authentication, session management, and SQLite persistence.
+A Flask web app to upload tabular datasets (CSV, XLSX, tab-separated TXT), do quick preprocessing, get chart recommendations, and create, edit, view and export visualizations. Includes user accounts (Flask-Login) with SQLite storage.
 
-### Features
-- User registration and login (Flask-Login, SQLite via SQLAlchemy)
-- File upload (CSV, Excel, TXT) up to 16 MB
-- Preprocessing: drop duplicates, drop rows with missing values, keep selected columns
-- Smart recommendations for chart types based on data
-- Create visualizations: line, bar, scatter, pie, histogram
-- View, edit, delete, and export visualizations (PNG)
-- Download or delete uploaded datasets
-- Session persistence (Flask-Session, filesystem)
+## Features
+- Register / login (password rules enforced, hashed passwords)
+- Upload CSV / XLSX / TXT (default limit 64 MB, set with `MAX_UPLOAD_MB`)
+- Preprocessing: drop duplicate rows, drop rows with missing values, keep selected columns
+- Chart recommendations (correlations, distributions, category comparisons, time series for datetime columns)
+- Chart types: line, bar (mean of Y per category), scatter, pie, histogram, with optional color grouping. Large datasets are aggregated or sampled (20k points) for the chart.
+- Interactive view (Plotly), edit, delete, and PNG export (matplotlib) of saved visualizations
+- Download or delete datasets; every dataset/visualization is private to its owner
 
-### Project Structure
+Not included: forecasting in the web app (see "Experiments" below), email verification.
+
+## Quickstart
+```bash
+git clone https://github.com/parvashah29/Data-Visualization-App.git
+cd Data-Visualization-App
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # then set SECRET_KEY to a long random string
+python app.py               # http://127.0.0.1:5000
 ```
-.
-├── app.py                         # Flask application (routes, models, logic)
-├── data/
-│   ├── raw/                       # Raw sample data (e.g., walmart.csv)
-│   └── processed/                 # Example processed outputs and images
-├── instance/
-│   ├── new_users.db               # SQLite database used by the app
-│   └── users.db                   # Legacy/backup DB (not used by default)
-├── templates/                     # Jinja2 templates
-│   ├── base.html
-│   ├── index.html
-│   ├── login.html
-│   ├── register.html
-│   ├── verify_email.html
-│   ├── dashboard.html
-│   ├── preprocess.html
-│   ├── visualize.html
-│   ├── view_visualization.html
-│   └── edit_visualization.html
-├── static/
-│   └── images/
-├── uploads/                       # User-uploaded datasets (per-session/user naming)
-├── src/                           # Optional data/ML utilities (not required to run app)
-│   ├── data_prep/
-│   ├── feature_eng/
-│   └── modeling/
-├── sales_forecasting.pbix         # Example Power BI file (standalone)
-├── requirements.txt
-├── LICENSE
-└── README.md
+The SQLite database (`instance/app.db`), `uploads/` and `flask_session/` are created automatically and are git-ignored. If `SECRET_KEY` is unset, a random key is generated on each start (sessions will not survive restarts).
+
+Run the tests: `python -m pytest tests`
+
+Production: `gunicorn app:app`.
+
+## Configuration (environment variables / `.env`)
+| Variable | Default |
+|---|---|
+| `SECRET_KEY` | random per start |
+| `DATABASE_URL` | `sqlite:///instance/app.db` |
+| `UPLOAD_FOLDER` | `./uploads` |
+| `MAX_UPLOAD_MB` | `64` |
+| `HOST`, `PORT`, `FLASK_DEBUG` | `127.0.0.1`, `5000`, off |
+
+## Sample dataset
+`data/raw/walmart.csv` (about 22 MB, Walmart Black Friday purchases: User_ID, Product_ID, Gender, Age, Occupation, City_Category, Purchase, ...). Upload it from the dashboard to try the full flow. The tests exercise it end to end. `data/processed/` holds example outputs from the experiment scripts.
+
+## Project layout
+```
+app.py              Flask app (models, routes, chart logic)
+templates/          Jinja2 templates
+tests/              pytest suite (register, upload, preprocess, all chart types, export, access control)
+data/raw, data/processed   sample data
+src/                offline sales-forecasting experiments (not used by the app)
+sales_forecasting.pbix     standalone Power BI file
 ```
 
-### Quickstart
-1. Install Python 3.8+.
-2. (Optional) Create and activate a virtual environment.
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. (Optional) Configure email for verification codes by setting environment variables:
-   ```bash
-   export SMTP_USERNAME="your-email@gmail.com"
-   export SMTP_PASSWORD="your-app-password"
-   ```
-5. Start the app:
-   ```bash
-   python app.py
-   ```
-   The app will create the SQLite database (if missing) and run on `http://127.0.0.1:5000`.
+## Experiments (`src/`)
+Standalone scripts for data prep, feature engineering and forecasting (XGBoost / Holt-Winters). Only `src/data_prep` was verified to run (needs just pandas). The feature-engineering and modeling scripts additionally need `scikit-learn`, `xgboost`, `statsmodels` and `joblib`, which are not in `requirements.txt`, and were not re-verified.
 
-### Configuration
-- Secret key: update `app.config['SECRET_KEY']` in `app.py` for production.
-- Database: default is SQLite at `instance/new_users.db`.
-- Uploads: saved under `uploads/` with a 16 MB limit.
-- Allowed file types: `.csv`, `.xlsx`, `.txt` (tab-delimited for TXT).
-
-### Typical Workflow
-1. Register and log in.
-2. Upload a dataset from the dashboard.
-3. Review preview stats and optionally clean data (drop duplicates/NA, select columns).
-4. Create a visualization: choose chart type, X/Y axes, and optional color grouping.
-5. Save, view, and export the visualization as PNG. You can edit or delete it later.
-6. Optionally download or delete the processed dataset.
-
-### Key Routes (UI)
-- `/` — Landing page
-- `/login`, `/register`, `/logout` — Auth
-- `/dashboard` — Datasets and visualizations
-- `/upload` — Upload dataset (POST)
-- `/preprocess/<int:dataset_id>` — Clean dataset
-- `/visualize/<int:dataset_id>` — Create visualization
-- `/view/<int:viz_id>` — View visualization
-- `/edit/<int:viz_id>` — Edit visualization
-- `/export-viz/<int:viz_id>` — Export PNG
-- `/download/<int:dataset_id>` — Download dataset
-- `/delete/<int:dataset_id>`, `/delete-viz/<int:viz_id>` — Delete
-
-### Notes
-- The `sales_forecasting.pbix` file is provided as a standalone Power BI artifact and is not required to run the Flask app.
-- The `src/` directory contains optional data preparation and modeling scripts used for experimentation; the web app does not depend on them.
-
-### License
-This project is licensed under the terms specified in `LICENSE`.
+## License
+See `LICENSE`.

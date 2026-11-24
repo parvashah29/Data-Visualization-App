@@ -20,8 +20,8 @@ class DataPreparation:
         df = df.drop_duplicates()
         
         # Handle missing values
-        df = df.fillna(method='ffill')  # Forward fill
-        df = df.fillna(method='bfill')  # Backward fill for any remaining NaNs
+        df = df.ffill()  # Forward fill
+        df = df.bfill()  # Backward fill for any remaining NaNs
         
         return df
     

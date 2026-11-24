@@ -1,121 +1,80 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, send_file
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
-import os
-from werkzeug.utils import secure_filename
-import pandas as pd
-import json
-from datetime import datetime, timedelta
-import pytz
 import io
+import json
+import os
+from datetime import datetime, timedelta
+from urllib.parse import urlparse
+
 import matplotlib
-matplotlib.use('Agg')  # Set the backend to non-GUI
+matplotlib.use('Agg')  # non-GUI backend
 import matplotlib.pyplot as plt
-import seaborn as sns
-import base64
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import numpy as np
-from flask_session import Session
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import random
+import pandas as pd
+import pytz
 import string
+from dotenv import load_dotenv
+from flask import (Flask, render_template, request, redirect, url_for, flash,
+                   send_file)
+from flask_login import (LoginManager, UserMixin, login_user, login_required,
+                         logout_user, current_user)
+from flask_session import Session
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
-# Create IST timezone object
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+
 IST = pytz.timezone('Asia/Kolkata')
+ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'txt'}
+CHART_TYPES = {'line', 'bar', 'scatter', 'pie', 'histogram'}
+MAX_PLOT_POINTS = 20000  # cap rows sent to the chart so big files stay fast
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'  # Use a fixed secret key instead of random
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///new_users.db'
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
 
-# Session configuration
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['SESSION_PERMANENT'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-Session(app)  # Initialize Flask-Session
+def create_app(test_config=None):
+    app = Flask(__name__)
+    instance_dir = os.path.join(BASE_DIR, 'instance')
+    os.makedirs(instance_dir, exist_ok=True)
 
-# Initialize other extensions
-db = SQLAlchemy(app)
+    app.config.update(
+        SECRET_KEY=os.environ.get('SECRET_KEY') or os.urandom(32).hex(),
+        SQLALCHEMY_DATABASE_URI=os.environ.get(
+            'DATABASE_URL', 'sqlite:///' + os.path.join(instance_dir, 'app.db')),
+        UPLOAD_FOLDER=os.environ.get('UPLOAD_FOLDER', os.path.join(BASE_DIR, 'uploads')),
+        MAX_CONTENT_LENGTH=int(os.environ.get('MAX_UPLOAD_MB', '64')) * 1024 * 1024,
+        SESSION_TYPE='filesystem',
+        SESSION_FILE_DIR=os.environ.get('SESSION_FILE_DIR', os.path.join(BASE_DIR, 'flask_session')),
+        SESSION_PERMANENT=True,
+        PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+    )
+    if test_config:
+        app.config.update(test_config)
+
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
+    Session(app)
+    db.init_app(app)
+    login_manager.init_app(app)
+
+    register_routes(app)
+    with app.app_context():
+        db.create_all()
+    return app
+
+
+db = SQLAlchemy()
 login_manager = LoginManager()
-login_manager.init_app(app)
 login_manager.login_view = 'login'
-login_manager.session_protection = "strong"
+login_manager.session_protection = 'strong'
 
-# Ensure upload folder exists
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-# Email configuration
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USERNAME = os.environ.get('SMTP_USERNAME', 'your-email@gmail.com')
-SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', 'your-app-password')
-
-# Store verification codes temporarily (in production, use Redis or similar)
-verification_codes = {}
-
-def send_verification_email(email, code):
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = SMTP_USERNAME
-        msg['To'] = email
-        msg['Subject'] = "Verify Your Email - Sales Data Forecasting"
-        
-        body = f"""
-        <html>
-            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                    <h2 style="color: #2575fc;">Welcome to Sales Data Forecasting!</h2>
-                    <p>Thank you for creating an account. To complete your registration, please use the following verification code:</p>
-                    <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-radius: 10px; margin: 20px 0;">
-                        <div style="font-size: 32px; letter-spacing: 8px; font-weight: bold; color: #2575fc;">
-                            {code}
-                        </div>
-                    </div>
-                    <p>This code will expire in 10 minutes for security reasons.</p>
-                    <p style="color: #666;">If you didn't request this verification, please ignore this email.</p>
-                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-                    <p style="color: #666; font-size: 12px; text-align: center;">
-                        This is an automated message. Please do not reply to this email.
-                    </p>
-                </div>
-            </body>
-        </html>
-        """
-        
-        msg.attach(MIMEText(body, 'html'))
-        
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-            
-        return True
-        
-    except smtplib.SMTPAuthenticationError:
-        print("SMTP Authentication Error: Please check your email credentials")
-        return False
-    except smtplib.SMTPException as e:
-        print(f"SMTP Error: {str(e)}")
-        return False
-    except Exception as e:
-        print(f"Unexpected error sending email: {str(e)}")
-        return False
-
-def generate_verification_code():
-    return ''.join(random.choices(string.digits, k=4))
 
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(120), nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     datasets = db.relationship('Dataset', backref='user', lazy=True)
     visualizations = db.relationship('Visualization', backref='user', lazy=True)
     last_login = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(IST))
+
 
 class Dataset(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -124,7 +83,8 @@ class Dataset(db.Model):
     upload_date = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(IST))
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     file_type = db.Column(db.String(10), nullable=False)
-    columns = db.Column(db.Text)  # Store column names as JSON string
+    columns = db.Column(db.Text)  # JSON list of column names
+
 
 class Visualization(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -136,863 +96,603 @@ class Visualization(db.Model):
     y_axis = db.Column(db.String(100))
     color_by = db.Column(db.String(100))
     created_date = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(IST))
-    config = db.Column(db.Text)  # Store additional configuration as JSON string
+    config = db.Column(db.Text)
+
 
 @login_manager.user_loader
 def load_user(user_id):
     return db.session.get(User, int(user_id))
 
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        user = User.query.filter_by(username=username).first()
-        if user and check_password_hash(user.password_hash, password):
-            login_user(user, remember=True)  # Enable remember me
-            # Update last_login with IST time
-            user.last_login = datetime.now(IST)
-            db.session.commit()
-            next_page = request.args.get('next')
-            return redirect(next_page) if next_page else redirect(url_for('dashboard'))
-        flash('Invalid username or password', 'error')
-    return render_template('login.html')
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        confirm_password = request.form.get('confirm_password')
-        
-        # Check if username or email already exists
-        if User.query.filter_by(username=username).first():
-            flash('Username already exists. Please choose another one.', 'danger')
-            return redirect(url_for('register'))
-        
-        if User.query.filter_by(email=email).first():
-            flash('Email already registered. Please use another email or login.', 'danger')
-            return redirect(url_for('register'))
-        
-        # Validate password strength
-        if len(password) < 8:
-            flash('Password must be at least 8 characters long.', 'danger')
-            return redirect(url_for('register'))
-        
-        if not any(c.isupper() for c in password):
-            flash('Password must contain at least one uppercase letter.', 'danger')
-            return redirect(url_for('register'))
-        
-        if not any(c.islower() for c in password):
-            flash('Password must contain at least one lowercase letter.', 'danger')
-            return redirect(url_for('register'))
-        
-        if not any(c.isdigit() for c in password):
-            flash('Password must contain at least one number.', 'danger')
-            return redirect(url_for('register'))
-        
-        if not any(c in string.punctuation for c in password):
-            flash('Password must contain at least one special character.', 'danger')
-            return redirect(url_for('register'))
-        
-        if password != confirm_password:
-            flash('Passwords do not match.', 'danger')
-            return redirect(url_for('register'))
-        
-        # Create new user
-        new_user = User(
-            username=username,
-            email=email,
-            password_hash=generate_password_hash(password)
-        )
-        db.session.add(new_user)
-        db.session.commit()
-        
-        flash('Registration successful! Please login.', 'success')
-        return redirect(url_for('login'))
-    
-    return render_template('register.html')
-
-@app.route('/verify_email/<email>', methods=['GET', 'POST'])
-def verify_email(email):
-    if email not in verification_codes:
-        flash('Invalid verification request. Please register again.', 'danger')
-        return redirect(url_for('register'))
-    
-    if request.method == 'POST':
-        code = request.form.get('code')
-        stored_data = verification_codes[email]
-        
-        # Check if code has expired (10 minutes)
-        if (datetime.now() - stored_data['timestamp']).total_seconds() > 600:
-            del verification_codes[email]
-            flash('Verification code has expired. Please register again.', 'danger')
-            return redirect(url_for('register'))
-        
-        if code == stored_data['code']:
-            # Create new user
-            user_data = stored_data['user_data']
-            new_user = User(
-                username=user_data['username'],
-                email=user_data['email'],
-                password_hash=user_data['password']
-            )
-            db.session.add(new_user)
-            db.session.commit()
-            
-            # Clean up verification data
-            del verification_codes[email]
-            
-            flash('Email verified successfully! Please login.', 'success')
-            return redirect(url_for('login'))
-        else:
-            flash('Invalid verification code. Please try again.', 'danger')
-    
-    return render_template('verify_email.html', email=email)
-
-@app.route('/resend_code/<email>')
-def resend_code(email):
-    if email not in verification_codes:
-        flash('Invalid request. Please register again.', 'danger')
-        return redirect(url_for('register'))
-    
-    # Generate new code
-    new_code = generate_verification_code()
-    verification_codes[email]['code'] = new_code
-    verification_codes[email]['timestamp'] = datetime.now()
-    
-    if send_verification_email(email, new_code):
-        flash('New verification code has been sent to your email.', 'info')
-    else:
-        flash('Error sending verification email. Please try again.', 'danger')
-    
-    return redirect(url_for('verify_email', email=email))
-
-@app.route('/dashboard')
-@login_required
-def dashboard():
-    datasets = Dataset.query.filter_by(user_id=current_user.id).all()
-    visualizations = Visualization.query.filter_by(user_id=current_user.id).all()
-    
-    # Format last_login in IST with custom format
-    last_login = 'Never'
-    if current_user.last_login:
-        try:
-            # Handle both timezone-aware and naive datetimes
-            if current_user.last_login.tzinfo is None:
-                ist_time = IST.localize(current_user.last_login)
-            else:
-                ist_time = current_user.last_login.astimezone(IST)
-            last_login = ist_time.strftime('%d/%m/%Y %I:%M %p')
-        except Exception:
-            last_login = current_user.last_login.strftime('%d/%m/%Y %I:%M %p')
-    
-    return render_template('dashboard.html', 
-                          username=current_user.username,
-                          datasets=datasets, 
-                          visualizations=visualizations,
-                          last_login=last_login)
-
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for('index'))
-
-@app.route('/upload', methods=['GET', 'POST'])
-@login_required
-def upload_file():
-    if request.method != 'POST':
-        return redirect(url_for('dashboard'))
-    
-    try:
-        if 'file' not in request.files:
-            flash('No file selected. Please choose a file to upload.', 'error')
-            return redirect(url_for('dashboard'))
-        
-        file = request.files['file']
-        dataset_name = request.form.get('dataset_name', '').strip()
-        
-        if not dataset_name:
-            flash('Please provide a name for your dataset.', 'error')
-            return redirect(url_for('dashboard'))
-        
-        if file.filename == '':
-            flash('No file selected. Please choose a file to upload.', 'error')
-            return redirect(url_for('dashboard'))
-        
-        if not allowed_file(file.filename):
-            flash('File type not allowed. Please upload a CSV, Excel, or TXT file.', 'error')
-            return redirect(url_for('dashboard'))
-        
-        # Create upload folder if it doesn't exist
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        
-        # Save file with unique name
-        filename = secure_filename(file.filename)
-        unique_filename = f"{current_user.id}_{int(datetime.utcnow().timestamp())}_{filename}"
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
-        
-        try:
-            file.save(file_path)
-            
-            # Read the file to get column information
-            if filename.endswith('.csv'):
-                df = pd.read_csv(file_path)
-            elif filename.endswith('.xlsx'):
-                df = pd.read_excel(file_path)
-            elif filename.endswith('.txt'):
-                df = pd.read_csv(file_path, sep='\t')
-            else:
-                raise ValueError("Unsupported file format")
-            
-            # Store column names as JSON
-            columns_json = json.dumps(df.columns.tolist())
-            
-            # Create dataset record
-            dataset = Dataset(
-                name=dataset_name,
-                filename=unique_filename,
-                user_id=current_user.id,
-                file_type=filename.rsplit('.', 1)[1].lower(),
-                columns=columns_json
-            )
-            db.session.add(dataset)
-            db.session.commit()
-            
-            flash(f'Dataset "{dataset_name}" uploaded successfully!', 'success')
-            return redirect(url_for('preprocess', dataset_id=dataset.id))
-            
-        except Exception as e:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            flash(f'Error processing file: {str(e)}', 'error')
-            
-    except Exception as e:
-        flash(f'An unexpected error occurred: {str(e)}', 'error')
-    
-    return redirect(url_for('dashboard'))
+# ---------------------------------------------------------------- helpers
 
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'csv', 'xlsx', 'txt'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-@app.route('/preprocess/<int:dataset_id>', methods=['GET', 'POST'])
-@login_required
-def preprocess(dataset_id):
-    try:
-        dataset = Dataset.query.get_or_404(dataset_id)
-        
-        if dataset.user_id != current_user.id:
-            flash('You do not have permission to access this dataset', 'error')
-            return redirect(url_for('dashboard'))
-        
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
-        
-        try:
-            # Read the dataset
-            if dataset.file_type == 'csv':
-                df = pd.read_csv(file_path)
-            elif dataset.file_type == 'xlsx':
-                df = pd.read_excel(file_path)
-            elif dataset.file_type == 'txt':
-                df = pd.read_csv(file_path, sep='\t')
-            
-            # Basic dataset information
-            info = {
-                'total_rows': len(df),
-                'total_columns': len(df.columns),
-                'missing_cells': df.isnull().sum().sum(),
-                'duplicate_rows': df.duplicated().sum()
-            }
-            
-            # Column information
-            columns_info = []
-            for column in df.columns:
-                col_info = {
-                    'name': column,
-                    'dtype': str(df[column].dtype),
-                    'missing_values': int(df[column].isnull().sum()),
-                    'unique_values': int(df[column].nunique()),
-                    'sample_values': df[column].dropna().head(3).tolist()
-                }
-                columns_info.append(col_info)
-            
-            if request.method == 'POST':
-                # Get selected operations from form
-                drop_duplicates = request.form.get('drop_duplicates') == 'on'
-                drop_na_rows = request.form.get('drop_na_rows') == 'on'
-                selected_columns = request.form.getlist('selected_columns')
-                
-                # Create a copy of the dataframe
-                cleaned_df = df.copy()
-                
-                # Apply selected operations
-                if drop_duplicates:
-                    cleaned_df = cleaned_df.drop_duplicates()
-                
-                if drop_na_rows:
-                    cleaned_df = cleaned_df.dropna()
-                
-                # Keep only selected columns if any are selected
-                if selected_columns:
-                    cleaned_df = cleaned_df[selected_columns]
-                
-                # Save the cleaned dataset
-                cleaned_filename = f"cleaned_{dataset.filename}"
-                cleaned_path = os.path.join(app.config['UPLOAD_FOLDER'], cleaned_filename)
-                
-                if dataset.file_type == 'csv':
-                    cleaned_df.to_csv(cleaned_path, index=False)
-                elif dataset.file_type == 'xlsx':
-                    cleaned_df.to_excel(cleaned_path, index=False)
-                elif dataset.file_type == 'txt':
-                    cleaned_df.to_csv(cleaned_path, sep='\t', index=False)
-                
-                # Update dataset record
-                dataset.filename = cleaned_filename
-                dataset.columns = json.dumps(cleaned_df.columns.tolist())
-                db.session.commit()
-                
-                flash('Data cleaning completed successfully!', 'success')
-                return redirect(url_for('visualize', dataset_id=dataset.id))
-            
-            # For GET request, show the data preview and cleaning options
-            preview_data = df.head(5).to_dict('records')
-            
-            return render_template('preprocess.html',
-                                dataset=dataset,
-                                info=info,
-                                columns_info=columns_info,
-                                preview_data=preview_data,
-                                columns=df.columns.tolist())
-            
-        except Exception as e:
-            print(f"Error processing dataset: {str(e)}")
-            flash(f'Error processing dataset: {str(e)}', 'error')
-            return redirect(url_for('dashboard'))
-            
-    except Exception as e:
-        print(f"Error accessing dataset: {str(e)}")
-        flash(f'Error accessing dataset: {str(e)}', 'error')
-        return redirect(url_for('dashboard'))
+
+def read_table(path, file_type):
+    if file_type == 'csv':
+        return pd.read_csv(path)
+    if file_type == 'xlsx':
+        return pd.read_excel(path)
+    if file_type == 'txt':
+        return pd.read_csv(path, sep='\t')
+    raise ValueError(f'Unsupported file type: {file_type}')
+
+
+def dataset_path(app, dataset):
+    return os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
+
+
+def load_dataset_df(app, dataset):
+    path = dataset_path(app, dataset)
+    if not os.path.exists(path):
+        raise FileNotFoundError('The dataset file is missing on the server.')
+    return read_table(path, dataset.file_type)
+
+
+def column_groups(df):
+    numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])
+               and not pd.api.types.is_bool_dtype(df[c])]
+    datetime_cols = [c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])]
+    categorical = [c for c in df.columns if c not in numeric and c not in datetime_cols]
+    return numeric, categorical, datetime_cols
+
+
+def clean_axis(value, df):
+    """Form values may be '', 'None' or a column that no longer exists."""
+    if value in (None, '', 'None'):
+        return None
+    return value if value in df.columns else None
+
+
+def safe_next(target):
+    """Only allow same-site relative redirects after login."""
+    if not target:
+        return None
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc or not target.startswith('/') or target.startswith('//'):
+        return None
+    return target
+
 
 def get_visualization_recommendations(df):
-    """Analyze dataset and recommend appropriate visualizations"""
+    """Analyze dataset and recommend appropriate visualizations."""
     recommendations = []
-    
-    # Get column types
-    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
-    categorical_cols = df.select_dtypes(include=['object', 'category']).columns
-    datetime_cols = df.select_dtypes(include=['datetime64']).columns
-    
-    # Time Series Analysis
-    if len(datetime_cols) > 0:
-        for date_col in datetime_cols:
-            for num_col in numeric_cols:
-                # Check if there's a trend over time
-                df_sorted = df.sort_values(date_col)
-                correlation = df_sorted[num_col].corr(pd.to_numeric(df_sorted.index))
-                trend_type = "increasing" if correlation > 0.5 else "decreasing" if correlation < -0.5 else "varying"
-                
-                recommendations.append({
-                    'category': 'Trends & Patterns',
-                    'type': 'line',
-                    'title': f'Time Series Analysis: {num_col} Over Time',
-                    'x_axis': date_col,
-                    'y_axis': num_col,
-                    'description': f'Track {trend_type} trend of {num_col} over time. This visualization helps identify temporal patterns and seasonality.',
-                    'confidence': min(abs(correlation) * 100, 100)
-                })
-    
-    # Correlation Analysis
+    if len(df) == 0:
+        return recommendations
+    numeric_cols, categorical_cols, datetime_cols = column_groups(df)
+
+    for date_col in datetime_cols:
+        for num_col in numeric_cols:
+            df_sorted = df.sort_values(date_col)
+            corr = df_sorted[num_col].corr(pd.Series(range(len(df_sorted)), index=df_sorted.index))
+            if pd.isna(corr):
+                corr = 0.0
+            trend = "increasing" if corr > 0.5 else "decreasing" if corr < -0.5 else "varying"
+            recommendations.append({
+                'category': 'Trends & Patterns', 'type': 'line',
+                'title': f'Time Series Analysis: {num_col} Over Time',
+                'x_axis': date_col, 'y_axis': num_col,
+                'description': f'Track {trend} trend of {num_col} over time.',
+                'confidence': min(abs(corr) * 100, 100)})
+
     if len(numeric_cols) >= 2:
         corr_matrix = df[numeric_cols].corr()
         for i in range(len(numeric_cols)):
-            for j in range(i+1, len(numeric_cols)):
-                correlation = abs(corr_matrix.iloc[i, j])
-                if correlation > 0.3:  # Include moderate to strong correlations
-                    relationship = "strong" if correlation > 0.7 else "moderate"
+            for j in range(i + 1, len(numeric_cols)):
+                c = corr_matrix.iloc[i, j]
+                if pd.notna(c) and abs(c) > 0.3:
+                    c = abs(c)
+                    rel = "strong" if c > 0.7 else "moderate"
                     recommendations.append({
-                        'category': 'Correlations',
-                        'type': 'scatter',
+                        'category': 'Correlations', 'type': 'scatter',
                         'title': f'Correlation: {numeric_cols[i]} vs {numeric_cols[j]}',
-                        'x_axis': numeric_cols[i],
-                        'y_axis': numeric_cols[j],
-                        'description': f'A {relationship} {correlation:.2f} correlation detected between these variables. This suggests they may be related.',
-                        'confidence': correlation * 100
-                    })
-    
-    # Distribution Analysis
-    for num_col in numeric_cols:
-        skewness = df[num_col].skew()
-        distribution_type = "normal" if abs(skewness) < 0.5 else "right-skewed" if skewness > 0 else "left-skewed"
-        recommendations.append({
-            'category': 'Distributions',
-            'type': 'histogram',
-            'title': f'Distribution of {num_col}',
-            'x_axis': num_col,
-            'y_axis': 'Frequency',
-            'description': f'The data shows a {distribution_type} distribution with skewness of {skewness:.2f}. This helps understand the spread and central tendency.',
-            'confidence': min((1 - abs(skewness)/3) * 100, 100)
-        })
-    
-    # Categorical Analysis
-    for cat_col in categorical_cols:
-        value_counts = df[cat_col].value_counts()
-        unique_ratio = len(value_counts) / len(df)
-        
-        if unique_ratio < 0.1:  # If categorical column has reasonable number of unique values
-            # Pie Chart for Category Distribution
-            recommendations.append({
-                'category': 'Comparisons',
-                'type': 'pie',
-                'title': f'Distribution of {cat_col}',
-                'x_axis': cat_col,
-                'y_axis': None,
-                'description': f'Shows the proportion of {len(value_counts)} different categories in {cat_col}. The most common category represents {(value_counts.iloc[0]/len(df)*100):.1f}% of the data.',
-                'confidence': (1 - unique_ratio) * 100
-            })
-            
-            # Bar Charts for Numeric Comparisons
-            for num_col in numeric_cols:
-                agg_data = df.groupby(cat_col)[num_col].agg(['mean', 'std']).round(2)
-                max_category = agg_data['mean'].idxmax()
-                min_category = agg_data['mean'].idxmin()
-                
-                recommendations.append({
-                    'category': 'Comparisons',
-                    'type': 'bar',
-                    'title': f'Average {num_col} by {cat_col}',
-                    'x_axis': cat_col,
-                    'y_axis': num_col,
-                    'description': f'Compare {num_col} across categories. {max_category} has the highest average ({agg_data.loc[max_category, "mean"]:.2f}), while {min_category} has the lowest ({agg_data.loc[min_category, "mean"]:.2f}).',
-                    'confidence': 90 if agg_data['std'].mean() < agg_data['mean'].std() else 70
-                })
-    
-    # Sort recommendations by confidence
-    recommendations.sort(key=lambda x: x['confidence'], reverse=True)
-    
-    return recommendations
+                        'x_axis': numeric_cols[i], 'y_axis': numeric_cols[j],
+                        'description': f'A {rel} correlation ({c:.2f}) was detected between these variables.',
+                        'confidence': c * 100})
 
-@app.route('/visualize/<int:dataset_id>', methods=['GET', 'POST'])
-@login_required
-def visualize(dataset_id):
+    for num_col in numeric_cols:
+        skew = df[num_col].skew()
+        if pd.isna(skew):
+            continue
+        dist = "normal" if abs(skew) < 0.5 else "right-skewed" if skew > 0 else "left-skewed"
+        recommendations.append({
+            'category': 'Distributions', 'type': 'histogram',
+            'title': f'Distribution of {num_col}',
+            'x_axis': num_col, 'y_axis': None,
+            'description': f'The data shows a {dist} distribution (skewness {skew:.2f}).',
+            'confidence': max(min((1 - abs(skew) / 3) * 100, 100), 0)})
+
+    for cat_col in categorical_cols:
+        counts = df[cat_col].value_counts()
+        n = len(counts)
+        if n < 2 or n > 30:
+            continue
+        if n <= 12:
+            recommendations.append({
+                'category': 'Comparisons', 'type': 'pie',
+                'title': f'Distribution of {cat_col}',
+                'x_axis': cat_col, 'y_axis': None,
+                'description': f'Shows the proportion of {n} categories in {cat_col}. The most common represents {counts.iloc[0] / len(df) * 100:.1f}% of the data.',
+                'confidence': (1 - n / len(df)) * 100})
+        for num_col in numeric_cols:
+            agg = df.groupby(cat_col)[num_col].agg(['mean', 'std']).round(2)
+            if agg['mean'].isna().all():
+                continue
+            hi, lo = agg['mean'].idxmax(), agg['mean'].idxmin()
+            recommendations.append({
+                'category': 'Comparisons', 'type': 'bar',
+                'title': f'Average {num_col} by {cat_col}',
+                'x_axis': cat_col, 'y_axis': num_col,
+                'description': f'Compare {num_col} across categories. {hi} has the highest average ({agg.loc[hi, "mean"]:.2f}), {lo} the lowest ({agg.loc[lo, "mean"]:.2f}).',
+                'confidence': 90 if agg['std'].mean() < agg['mean'].std() else 70})
+
+    recommendations.sort(key=lambda r: r['confidence'], reverse=True)
+    return recommendations[:30]
+
+
+def prepare_plot_data(viz, df):
+    """Validate columns and reduce the frame to what the chart needs.
+
+    Returns (plot_df, y_label). Bar and pie charts are aggregated (mean for
+    bar, sum for pie with a Y column); other charts are sampled to
+    MAX_PLOT_POINTS rows.
+    """
+    needed = [c for c in (viz.x_axis, viz.y_axis, viz.color_by) if c]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+    if viz.chart_type not in CHART_TYPES:
+        raise ValueError(f"Unknown chart type: {viz.chart_type}")
+    if viz.chart_type in ('line', 'bar', 'scatter') and not viz.y_axis:
+        raise ValueError('This chart type needs a Y axis column.')
+
+    plot_df = df[list(dict.fromkeys(needed))].copy()
+    if viz.y_axis:
+        plot_df[viz.y_axis] = pd.to_numeric(plot_df[viz.y_axis], errors='coerce')
+    plot_df = plot_df.dropna()
+    if len(plot_df) == 0:
+        raise ValueError("No valid data points after cleaning. Check for missing or invalid values.")
+
+    ct = viz.chart_type
+    if ct == 'bar':
+        keys = [c for c in (viz.x_axis, viz.color_by) if c]
+        plot_df = plot_df.groupby(keys, as_index=False)[viz.y_axis].mean()
+    elif ct == 'pie':
+        names = viz.color_by or viz.x_axis
+        if viz.y_axis:
+            plot_df = plot_df.groupby(names, as_index=False)[viz.y_axis].sum()
+        else:
+            plot_df = plot_df[[names]].value_counts().reset_index(name='count')
+    else:
+        if len(plot_df) > MAX_PLOT_POINTS:
+            plot_df = plot_df.sample(MAX_PLOT_POINTS, random_state=0)
+        if ct == 'line':
+            plot_df = plot_df.sort_values(by=viz.x_axis)
+    return plot_df
+
+
+def build_plotly_html(viz, plot_df):
+    import plotly.express as px
+    import plotly.io as pio
+    kw = dict(title=viz.name, template='plotly_white')
+    ct = viz.chart_type
+    if ct == 'line':
+        fig = px.line(plot_df, x=viz.x_axis, y=viz.y_axis, color=viz.color_by, markers=len(plot_df) < 200, **kw)
+    elif ct == 'bar':
+        fig = px.bar(plot_df, x=viz.x_axis, y=viz.y_axis, color=viz.color_by, barmode='group', **kw)
+    elif ct == 'scatter':
+        fig = px.scatter(plot_df, x=viz.x_axis, y=viz.y_axis, color=viz.color_by, **kw)
+    elif ct == 'pie':
+        names = viz.color_by or viz.x_axis
+        values = viz.y_axis if viz.y_axis else 'count'
+        fig = px.pie(plot_df, names=names, values=values, **kw)
+    else:
+        fig = px.histogram(plot_df, x=viz.x_axis, color=viz.color_by, **kw)
+    fig.update_layout(margin=dict(l=40, r=40, t=60, b=40))
+    return pio.to_html(fig, full_html=False, include_plotlyjs='cdn', config={
+        'displayModeBar': True, 'displaylogo': False,
+        'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+        'toImageButtonOptions': {'format': 'png', 'filename': viz.name, 'scale': 2}})
+
+
+def render_png(viz, plot_df):
+    fig, ax = plt.subplots(figsize=(10, 6))
     try:
-        dataset = Dataset.query.get_or_404(dataset_id)
-        
-        if dataset.user_id != current_user.id:
-            flash('You do not have permission to access this dataset', 'error')
+        ct = viz.chart_type
+        if ct == 'pie':
+            names = viz.color_by or viz.x_axis
+            values = viz.y_axis if viz.y_axis else 'count'
+            ax.pie(plot_df[values], labels=plot_df[names].astype(str), autopct='%1.1f%%')
+            ax.set_ylabel('')
+        else:
+            if ct == 'histogram':
+                if viz.color_by:
+                    for g, sub in plot_df.groupby(viz.color_by):
+                        ax.hist(pd.to_numeric(sub[viz.x_axis], errors='coerce').dropna(), bins=30, alpha=0.6, label=str(g))
+                    ax.legend()
+                else:
+                    ax.hist(pd.to_numeric(plot_df[viz.x_axis], errors='coerce').dropna(), bins=30)
+            elif ct == 'bar':
+                if viz.color_by:
+                    piv = plot_df.pivot(index=viz.x_axis, columns=viz.color_by, values=viz.y_axis)
+                    piv.plot(kind='bar', ax=ax)
+                else:
+                    ax.bar(plot_df[viz.x_axis].astype(str), plot_df[viz.y_axis])
+                plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+            else:
+                groups = plot_df.groupby(viz.color_by) if viz.color_by else [(None, plot_df)]
+                for g, sub in groups:
+                    if ct == 'line':
+                        ax.plot(sub[viz.x_axis], sub[viz.y_axis], label=None if g is None else str(g))
+                    else:
+                        ax.scatter(sub[viz.x_axis], sub[viz.y_axis], s=8, label=None if g is None else str(g))
+                if viz.color_by:
+                    ax.legend()
+            ax.set_xlabel(viz.x_axis)
+            ax.set_ylabel(viz.y_axis if viz.y_axis else 'Count')
+        ax.set_title(viz.name)
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        return buf
+    finally:
+        plt.close(fig)
+
+
+# ---------------------------------------------------------------- routes
+
+def register_routes(app):
+    def owned_or_redirect(model, obj_id, what):
+        obj = db.get_or_404(model, obj_id)
+        if obj.user_id != current_user.id:
+            flash(f'You do not have permission to access this {what}', 'error')
+            return None
+        return obj
+
+    @app.route('/')
+    def index():
+        return render_template('index.html')
+
+    @app.route('/login', methods=['GET', 'POST'])
+    def login():
+        if request.method == 'POST':
+            username = request.form.get('username', '')
+            password = request.form.get('password', '')
+            user = User.query.filter_by(username=username).first()
+            if user and check_password_hash(user.password_hash, password):
+                login_user(user, remember=True)
+                user.last_login = datetime.now(IST)
+                db.session.commit()
+                return redirect(safe_next(request.args.get('next')) or url_for('dashboard'))
+            flash('Invalid username or password', 'error')
+        return render_template('login.html')
+
+    @app.route('/register', methods=['GET', 'POST'])
+    def register():
+        if request.method == 'POST':
+            username = (request.form.get('username') or '').strip()
+            email = (request.form.get('email') or '').strip()
+            password = request.form.get('password') or ''
+            confirm = request.form.get('confirm_password') or ''
+
+            error = None
+            if not username or not email or not password:
+                error = 'Username, email and password are required.'
+            elif User.query.filter_by(username=username).first():
+                error = 'Username already exists. Please choose another one.'
+            elif User.query.filter_by(email=email).first():
+                error = 'Email already registered. Please use another email or login.'
+            elif len(password) < 8:
+                error = 'Password must be at least 8 characters long.'
+            elif not any(c.isupper() for c in password):
+                error = 'Password must contain at least one uppercase letter.'
+            elif not any(c.islower() for c in password):
+                error = 'Password must contain at least one lowercase letter.'
+            elif not any(c.isdigit() for c in password):
+                error = 'Password must contain at least one number.'
+            elif not any(c in string.punctuation for c in password):
+                error = 'Password must contain at least one special character.'
+            elif password != confirm:
+                error = 'Passwords do not match.'
+            if error:
+                flash(error, 'danger')
+                return redirect(url_for('register'))
+
+            db.session.add(User(username=username, email=email,
+                                password_hash=generate_password_hash(password)))
+            db.session.commit()
+            flash('Registration successful! Please login.', 'success')
+            return redirect(url_for('login'))
+        return render_template('register.html')
+
+    @app.route('/dashboard')
+    @login_required
+    def dashboard():
+        datasets = Dataset.query.filter_by(user_id=current_user.id).all()
+        visualizations = Visualization.query.filter_by(user_id=current_user.id).all()
+        last_login = 'Never'
+        ll = current_user.last_login
+        if ll:
+            ll = IST.localize(ll) if ll.tzinfo is None else ll.astimezone(IST)
+            last_login = ll.strftime('%d/%m/%Y %I:%M %p')
+        return render_template('dashboard.html', username=current_user.username,
+                               datasets=datasets, visualizations=visualizations,
+                               last_login=last_login)
+
+    @app.route('/logout')
+    @login_required
+    def logout():
+        logout_user()
+        return redirect(url_for('index'))
+
+    @app.route('/upload', methods=['GET', 'POST'])
+    @login_required
+    def upload_file():
+        if request.method != 'POST':
             return redirect(url_for('dashboard'))
-        
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
-        
+        file = request.files.get('file')
+        dataset_name = request.form.get('dataset_name', '').strip()
+        if not dataset_name:
+            flash('Please provide a name for your dataset.', 'error')
+            return redirect(url_for('dashboard'))
+        if file is None or file.filename == '':
+            flash('No file selected. Please choose a file to upload.', 'error')
+            return redirect(url_for('dashboard'))
+        if not allowed_file(file.filename):
+            flash('File type not allowed. Please upload a CSV, Excel, or TXT file.', 'error')
+            return redirect(url_for('dashboard'))
+
+        filename = secure_filename(file.filename)
+        if not filename or '.' not in filename:
+            flash('Invalid file name.', 'error')
+            return redirect(url_for('dashboard'))
+        ext = filename.rsplit('.', 1)[1].lower()
+        unique = f"{current_user.id}_{int(datetime.now().timestamp())}_{filename}"
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique)
         try:
-            # Read the dataset
-            if dataset.file_type == 'csv':
-                df = pd.read_csv(file_path)
-            elif dataset.file_type == 'xlsx':
-                df = pd.read_excel(file_path)
-            elif dataset.file_type == 'txt':
-                df = pd.read_csv(file_path, sep='\t')
-            
-            # Get column types for selection options
-            numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
-            categorical_columns = df.select_dtypes(include=['object', 'category']).columns.tolist()
-            datetime_columns = df.select_dtypes(include=['datetime64']).columns.tolist()
-            
-            # Get visualization recommendations
-            recommendations = get_visualization_recommendations(df)
-            
-            columns = {
-                'numeric': numeric_columns,
-                'categorical': categorical_columns,
-                'datetime': datetime_columns,
-                'all': df.columns.tolist()
+            file.save(file_path)
+            df = read_table(file_path, ext)
+            if df.shape[1] == 0:
+                raise ValueError('The file has no columns.')
+            ds = Dataset(name=dataset_name[:100], filename=unique, user_id=current_user.id,
+                         file_type=ext, columns=json.dumps([str(c) for c in df.columns]))
+            db.session.add(ds)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            flash(f'Error processing file: {e}', 'error')
+            return redirect(url_for('dashboard'))
+        flash(f'Dataset "{dataset_name}" uploaded successfully!', 'success')
+        return redirect(url_for('preprocess', dataset_id=ds.id))
+
+    @app.route('/preprocess/<int:dataset_id>', methods=['GET', 'POST'])
+    @login_required
+    def preprocess(dataset_id):
+        dataset = owned_or_redirect(Dataset, dataset_id, 'dataset')
+        if dataset is None:
+            return redirect(url_for('dashboard'))
+        try:
+            df = load_dataset_df(app, dataset)
+
+            if request.method == 'POST':
+                cleaned = df.copy()
+                if request.form.get('drop_duplicates') == 'on':
+                    cleaned = cleaned.drop_duplicates()
+                if request.form.get('drop_na_rows') == 'on':
+                    cleaned = cleaned.dropna()
+                selected = [c for c in request.form.getlist('selected_columns') if c in cleaned.columns]
+                if selected:
+                    cleaned = cleaned[selected]
+                if len(cleaned) == 0:
+                    flash('Cleaning would remove every row; nothing was changed.', 'error')
+                    return redirect(url_for('preprocess', dataset_id=dataset.id))
+
+                base = dataset.filename[len('cleaned_'):] if dataset.filename.startswith('cleaned_') else dataset.filename
+                cleaned_filename = f"cleaned_{base}"
+                cleaned_path = os.path.join(app.config['UPLOAD_FOLDER'], cleaned_filename)
+                if dataset.file_type == 'csv':
+                    cleaned.to_csv(cleaned_path, index=False)
+                elif dataset.file_type == 'xlsx':
+                    cleaned.to_excel(cleaned_path, index=False)
+                else:
+                    cleaned.to_csv(cleaned_path, sep='\t', index=False)
+                dataset.filename = cleaned_filename
+                dataset.columns = json.dumps([str(c) for c in cleaned.columns])
+                db.session.commit()
+                flash('Data cleaning completed successfully!', 'success')
+                return redirect(url_for('visualize', dataset_id=dataset.id))
+
+            info = {
+                'total_rows': len(df),
+                'total_columns': len(df.columns),
+                'missing_cells': int(df.isnull().sum().sum()),
+                'duplicate_rows': int(df.duplicated().sum()),
             }
-            
+            columns_info = [{
+                'name': c, 'dtype': str(df[c].dtype),
+                'missing_values': int(df[c].isnull().sum()),
+                'unique_values': int(df[c].nunique()),
+                'sample_values': df[c].dropna().head(3).tolist(),
+            } for c in df.columns]
+            return render_template('preprocess.html', dataset=dataset, info=info,
+                                   columns_info=columns_info,
+                                   preview_data=df.head(5).to_dict('records'),
+                                   columns=df.columns.tolist())
+        except Exception as e:
+            flash(f'Error processing dataset: {e}', 'error')
+            return redirect(url_for('dashboard'))
+
+    @app.route('/visualize/<int:dataset_id>', methods=['GET', 'POST'])
+    @login_required
+    def visualize(dataset_id):
+        dataset = owned_or_redirect(Dataset, dataset_id, 'dataset')
+        if dataset is None:
+            return redirect(url_for('dashboard'))
+        try:
+            df = load_dataset_df(app, dataset)
+            numeric, categorical, datetimes = column_groups(df)
+            columns = {'numeric': numeric, 'categorical': categorical,
+                       'datetime': datetimes, 'all': df.columns.tolist()}
+            recommendations = get_visualization_recommendations(df)
+
+            def page():
+                return render_template('visualize.html', dataset=dataset, columns=columns,
+                                       recommendations=recommendations,
+                                       sample_data=df.head(5).to_dict('records'))
+
             if request.method == 'POST':
                 viz_name = request.form.get('viz_name', '').strip()
                 chart_type = request.form.get('chart_type')
-                x_axis = request.form.get('x_axis')
-                y_axis = request.form.get('y_axis')
-                color_by = request.form.get('color_by')
-                
+                x_axis = clean_axis(request.form.get('x_axis'), df)
+                y_axis = clean_axis(request.form.get('y_axis'), df)
+                color_by = clean_axis(request.form.get('color_by'), df)
+
                 if not viz_name:
                     flash('Please provide a name for your visualization', 'error')
-                    return render_template('visualize.html', 
-                                        dataset=dataset,
-                                        columns=columns,
-                                        recommendations=recommendations,
-                                        sample_data=df.head(5).to_dict('records'))
-                
-                if not x_axis or (not y_axis and chart_type != 'pie'):
-                    flash('Please select both X and Y axis columns (except for pie charts)', 'error')
-                    return render_template('visualize.html',
-                                        dataset=dataset,
-                                        columns=columns,
-                                        recommendations=recommendations,
-                                        sample_data=df.head(5).to_dict('records'))
-                
-                viz = Visualization(
-                    name=viz_name,
-                    dataset_id=dataset_id,
-                    user_id=current_user.id,
-                    chart_type=chart_type,
-                    x_axis=x_axis,
-                    y_axis=y_axis,
-                    color_by=color_by if color_by != 'None' else None,
-                    created_date=datetime.now(IST)
-                )
+                    return page()
+                if chart_type not in CHART_TYPES:
+                    flash('Please choose a valid chart type', 'error')
+                    return page()
+                if not x_axis or (chart_type in ('line', 'bar', 'scatter') and not y_axis):
+                    flash('Please select the required X and Y axis columns', 'error')
+                    return page()
+                if chart_type in ('histogram',):
+                    y_axis = None
+
+                viz = Visualization(name=viz_name[:100], dataset_id=dataset.id,
+                                    user_id=current_user.id, chart_type=chart_type,
+                                    x_axis=x_axis, y_axis=y_axis, color_by=color_by,
+                                    created_date=datetime.now(IST))
                 db.session.add(viz)
                 db.session.commit()
-                
                 flash(f'Visualization "{viz_name}" created successfully!', 'success')
                 return redirect(url_for('view_visualization', viz_id=viz.id))
-            
-            sample_data = df.head(5).to_dict('records')
-            return render_template('visualize.html',
-                                dataset=dataset,
-                                columns=columns,
-                                recommendations=recommendations,
-                                sample_data=sample_data)
-            
+            return page()
         except Exception as e:
-            print(f"Error processing dataset: {str(e)}")
-            flash(f'Error processing dataset: {str(e)}', 'error')
+            flash(f'Error processing dataset: {e}', 'error')
             return redirect(url_for('dashboard'))
-            
-    except Exception as e:
-        print(f"Error accessing dataset: {str(e)}")
-        flash(f'Error accessing dataset: {str(e)}', 'error')
-        return redirect(url_for('dashboard'))
 
-@app.route('/view/<int:viz_id>')
-@login_required
-def view_visualization(viz_id):
-    try:
-        viz = Visualization.query.get_or_404(viz_id)
-        
-        # Check if the visualization belongs to the current user
-        if viz.user_id != current_user.id:
-            flash('You do not have permission to access this visualization')
+    @app.route('/view/<int:viz_id>')
+    @login_required
+    def view_visualization(viz_id):
+        viz = owned_or_redirect(Visualization, viz_id, 'visualization')
+        if viz is None:
             return redirect(url_for('dashboard'))
-        
-        # Load the dataset
         dataset = db.session.get(Dataset, viz.dataset_id)
         if not dataset:
-            flash('Dataset not found')
+            flash('Dataset not found', 'error')
             return redirect(url_for('dashboard'))
-            
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
-        if not os.path.exists(file_path):
-            flash('Dataset file not found')
-            return redirect(url_for('dashboard'))
-        
-        # Read the dataset
         try:
-            if dataset.file_type == 'csv':
-                df = pd.read_csv(file_path)
-            elif dataset.file_type == 'xlsx':
-                df = pd.read_excel(file_path)
-            elif dataset.file_type == 'txt':
-                df = pd.read_csv(file_path, sep='\t')
-                
-            # Validate required columns exist
-            required_columns = [viz.x_axis]
-            if viz.y_axis:  # y_axis might be optional for pie charts
-                required_columns.append(viz.y_axis)
-            if viz.color_by:
-                required_columns.append(viz.color_by)
-                
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
-            
-            # Create a copy of the dataframe for visualization
-            plot_df = df.copy()
-            
-            # Handle data based on chart type and column types
-            if viz.y_axis in plot_df.columns:
-                # Convert Y-axis to numeric if it's not already
-                plot_df[viz.y_axis] = pd.to_numeric(plot_df[viz.y_axis], errors='coerce')
-            
-            # Drop rows with missing values in required columns
-            plot_df = plot_df.dropna(subset=[col for col in required_columns if col in plot_df.columns])
-            
-            if len(plot_df) == 0:
-                raise ValueError("No valid data points after cleaning. Please check your data for missing or invalid values.")
-            
-            import plotly.express as px
-            import plotly.io as pio
-
-            # Handle NaN values
-            plot_df = plot_df.dropna(subset=[col for col in required_columns if col in plot_df.columns])
-            
-            # Create the visualization
-            if viz.chart_type == 'line':
-                plot_df = plot_df.sort_values(by=viz.x_axis)
-                fig = px.line(plot_df, x=viz.x_axis, y=viz.y_axis, color=viz.color_by, markers=True, 
-                              title=viz.name, template="plotly_white")
-            elif viz.chart_type == 'bar':
-                fig = px.bar(plot_df, x=viz.x_axis, y=viz.y_axis, color=viz.color_by, barmode='group', 
-                             title=viz.name, template="plotly_white")
-            elif viz.chart_type == 'scatter':
-                fig = px.scatter(plot_df, x=viz.x_axis, y=viz.y_axis, color=viz.color_by, 
-                                 title=viz.name, template="plotly_white")
-            elif viz.chart_type == 'pie':
-                category_col = viz.color_by if viz.color_by else viz.x_axis
-                if viz.y_axis:
-                    fig = px.pie(plot_df, names=category_col, values=viz.y_axis, title=viz.name, template="plotly_white")
-                else:
-                    fig = px.pie(plot_df, names=category_col, title=viz.name, template="plotly_white")
-            elif viz.chart_type == 'histogram':
-                fig = px.histogram(plot_df, x=viz.x_axis, color=viz.color_by, 
-                                   title=viz.name, template="plotly_white")
-            
-            # Improve layout and margins
-            fig.update_layout(margin=dict(l=40, r=40, t=60, b=40))
-            if viz.chart_type != 'pie' and viz.y_axis is None:
-                fig.update_yaxes(title_text="Count")
-            
-            # Generate interactive HTML
-            plot_html = pio.to_html(fig, full_html=False, include_plotlyjs='cdn', 
-                                    config={
-                                        'displayModeBar': True, 
-                                        'displaylogo': False,
-                                        'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
-                                        'toImageButtonOptions': {
-                                            'format': 'png', 
-                                            'filename': viz.name,
-                                            'scale': 2
-                                        }
-                                    })
-            
-            return render_template('view_visualization.html', 
-                                  viz=viz, 
-                                  dataset=dataset, 
-                                  plot_html=plot_html)
-        
+            df = load_dataset_df(app, dataset)
+            plot_df = prepare_plot_data(viz, df)
+            plot_html = build_plotly_html(viz, plot_df)
+            return render_template('view_visualization.html', viz=viz, dataset=dataset,
+                                   plot_html=plot_html)
         except Exception as e:
-            print(f"Data processing error: {str(e)}")  # Debug log
-            flash(f'Error processing data: {str(e)}')
+            flash(f'Error creating visualization: {e}', 'error')
             return redirect(url_for('dashboard'))
-    
-    except Exception as e:
-        print(f"Visualization error: {str(e)}")  # Debug log
-        flash(f'Error creating visualization: {str(e)}')
+
+    @app.route('/edit/<int:viz_id>', methods=['GET', 'POST'])
+    @login_required
+    def edit_visualization(viz_id):
+        viz = owned_or_redirect(Visualization, viz_id, 'visualization')
+        if viz is None:
+            return redirect(url_for('dashboard'))
+        dataset = db.session.get(Dataset, viz.dataset_id)
+        if not dataset:
+            flash('Dataset not found', 'error')
+            return redirect(url_for('dashboard'))
+        try:
+            df = load_dataset_df(app, dataset)
+            if request.method == 'POST':
+                chart_type = request.form.get('chart_type', viz.chart_type)
+                x_axis = clean_axis(request.form.get('x_axis'), df)
+                y_axis = clean_axis(request.form.get('y_axis'), df)
+                if chart_type not in CHART_TYPES or not x_axis or (
+                        chart_type in ('line', 'bar', 'scatter') and not y_axis):
+                    flash('Please choose a valid chart type and the required X/Y columns.', 'error')
+                    return redirect(url_for('edit_visualization', viz_id=viz.id))
+                viz.name = (request.form.get('viz_name') or viz.name).strip()[:100]
+                viz.chart_type = chart_type
+                viz.x_axis = x_axis
+                viz.y_axis = None if chart_type == 'histogram' else y_axis
+                viz.color_by = clean_axis(request.form.get('color_by'), df)
+                db.session.commit()
+                flash(f'Visualization "{viz.name}" updated successfully!', 'success')
+                return redirect(url_for('view_visualization', viz_id=viz.id))
+            return render_template('edit_visualization.html', viz=viz, dataset=dataset,
+                                   columns=df.columns.tolist())
+        except Exception as e:
+            flash(f'Error editing visualization: {e}', 'error')
+            return redirect(url_for('dashboard'))
+
+    @app.route('/delete/<int:dataset_id>')
+    @login_required
+    def delete_dataset(dataset_id):
+        dataset = owned_or_redirect(Dataset, dataset_id, 'dataset')
+        if dataset is None:
+            return redirect(url_for('dashboard'))
+        path = dataset_path(app, dataset)
+        if os.path.exists(path):
+            os.remove(path)
+        Visualization.query.filter_by(dataset_id=dataset_id).delete()
+        name = dataset.name
+        db.session.delete(dataset)
+        db.session.commit()
+        flash(f'Dataset "{name}" deleted successfully!', 'success')
         return redirect(url_for('dashboard'))
 
-@app.route('/edit/<int:viz_id>', methods=['GET', 'POST'])
-@login_required
-def edit_visualization(viz_id):
-    viz = Visualization.query.get_or_404(viz_id)
-    
-    # Check if the visualization belongs to the current user
-    if viz.user_id != current_user.id:
-        flash('You do not have permission to edit this visualization')
-        return redirect(url_for('dashboard'))
-    
-    # Load the dataset
-    dataset = db.session.get(Dataset, viz.dataset_id)
-    if not dataset:
-        flash('Dataset not found')
-        return redirect(url_for('dashboard'))
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
-    
-    try:
-        if dataset.file_type == 'csv':
-            df = pd.read_csv(file_path)
-        elif dataset.file_type == 'xlsx':
-            df = pd.read_excel(file_path)
-        elif dataset.file_type == 'txt':
-            df = pd.read_csv(file_path, sep='\t')
-        
-        columns = df.columns.tolist()
-        
-        if request.method == 'POST':
-            # Update visualization parameters
-            viz.name = request.form.get('viz_name', viz.name)
-            viz.chart_type = request.form.get('chart_type', viz.chart_type)
-            viz.x_axis = request.form.get('x_axis', viz.x_axis)
-            viz.y_axis = request.form.get('y_axis', viz.y_axis)
-            viz.color_by = request.form.get('color_by', viz.color_by)
-            
-            db.session.commit()
-            
-            flash(f'Visualization "{viz.name}" updated successfully!')
-            return redirect(url_for('view_visualization', viz_id=viz.id))
-        
-        return render_template('edit_visualization.html', 
-                              viz=viz, 
-                              dataset=dataset, 
-                              columns=columns)
-    
-    except Exception as e:
-        flash(f'Error editing visualization: {str(e)}')
+    @app.route('/delete-viz/<int:viz_id>')
+    @login_required
+    def delete_visualization(viz_id):
+        viz = owned_or_redirect(Visualization, viz_id, 'visualization')
+        if viz is None:
+            return redirect(url_for('dashboard'))
+        name = viz.name
+        db.session.delete(viz)
+        db.session.commit()
+        flash(f'Visualization "{name}" deleted successfully!', 'success')
         return redirect(url_for('dashboard'))
 
-@app.route('/delete/<int:dataset_id>')
-@login_required
-def delete_dataset(dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
-    
-    # Check if the dataset belongs to the current user
-    if dataset.user_id != current_user.id:
-        flash('You do not have permission to delete this dataset')
-        return redirect(url_for('dashboard'))
-    
-    # Delete the file
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-    
-    # Delete associated visualizations
-    Visualization.query.filter_by(dataset_id=dataset_id).delete()
-    
-    # Delete the dataset record
-    db.session.delete(dataset)
-    db.session.commit()
-    
-    flash(f'Dataset "{dataset.name}" deleted successfully!')
-    return redirect(url_for('dashboard'))
+    @app.route('/download/<int:dataset_id>')
+    @login_required
+    def download_dataset(dataset_id):
+        dataset = owned_or_redirect(Dataset, dataset_id, 'dataset')
+        if dataset is None:
+            return redirect(url_for('dashboard'))
+        path = dataset_path(app, dataset)
+        if not os.path.exists(path):
+            flash('File not found', 'error')
+            return redirect(url_for('dashboard'))
+        return send_file(path, as_attachment=True)
 
-@app.route('/delete-viz/<int:viz_id>')
-@login_required
-def delete_visualization(viz_id):
-    viz = Visualization.query.get_or_404(viz_id)
-    
-    # Check if the visualization belongs to the current user
-    if viz.user_id != current_user.id:
-        flash('You do not have permission to delete this visualization')
-        return redirect(url_for('dashboard'))
-    
-    # Delete the visualization record
-    db.session.delete(viz)
-    db.session.commit()
-    
-    flash(f'Visualization "{viz.name}" deleted successfully!')
-    return redirect(url_for('dashboard'))
+    @app.route('/export-viz/<int:viz_id>')
+    @login_required
+    def export_visualization(viz_id):
+        viz = owned_or_redirect(Visualization, viz_id, 'visualization')
+        if viz is None:
+            return redirect(url_for('dashboard'))
+        dataset = db.session.get(Dataset, viz.dataset_id)
+        if not dataset:
+            flash('Dataset not found', 'error')
+            return redirect(url_for('dashboard'))
+        try:
+            df = load_dataset_df(app, dataset)
+            img = render_png(viz, prepare_plot_data(viz, df))
+            return send_file(img, mimetype='image/png', as_attachment=True,
+                             download_name=f"{secure_filename(viz.name) or 'chart'}.png")
+        except Exception as e:
+            flash(f'Error exporting visualization: {e}', 'error')
+            return redirect(url_for('dashboard'))
 
-@app.route('/download/<int:dataset_id>')
-@login_required
-def download_dataset(dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
-    
-    # Check if the dataset belongs to the current user
-    if dataset.user_id != current_user.id:
-        flash('You do not have permission to download this dataset')
-        return redirect(url_for('dashboard'))
-    
-    # Get the file path
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
-    
-    if os.path.exists(file_path):
-        return send_file(file_path, as_attachment=True)
-    else:
-        flash('File not found')
-        return redirect(url_for('dashboard'))
 
-@app.route('/export-viz/<int:viz_id>')
-@login_required
-def export_visualization(viz_id):
-    viz = Visualization.query.get_or_404(viz_id)
-    
-    # Check if the visualization belongs to the current user
-    if viz.user_id != current_user.id:
-        flash('You do not have permission to export this visualization')
-        return redirect(url_for('dashboard'))
-    
-    # Load the dataset
-    dataset = db.session.get(Dataset, viz.dataset_id)
-    if not dataset:
-        flash('Dataset not found')
-        return redirect(url_for('dashboard'))
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], dataset.filename)
-    
-    try:
-        if dataset.file_type == 'csv':
-            df = pd.read_csv(file_path)
-        elif dataset.file_type == 'xlsx':
-            df = pd.read_excel(file_path)
-        elif dataset.file_type == 'txt':
-            df = pd.read_csv(file_path, sep='\t')
-        
-        # Create the visualization
-        plt.figure(figsize=(10, 6))
-        
-        if viz.chart_type == 'line':
-            if viz.color_by:
-                for group in df[viz.color_by].unique():
-                    group_data = df[df[viz.color_by] == group]
-                    plt.plot(group_data[viz.x_axis], group_data[viz.y_axis], label=group)
-                plt.legend()
-            else:
-                plt.plot(df[viz.x_axis], df[viz.y_axis])
-        
-        elif viz.chart_type == 'bar':
-            if viz.color_by:
-                df.groupby([viz.x_axis, viz.color_by])[viz.y_axis].sum().unstack().plot(kind='bar')
-                plt.legend()
-            else:
-                plt.bar(df[viz.x_axis], df[viz.y_axis])
-        
-        elif viz.chart_type == 'scatter':
-            if viz.color_by:
-                plt.scatter(df[viz.x_axis], df[viz.y_axis], c=df[viz.color_by], cmap='viridis')
-                plt.colorbar(label=viz.color_by)
-            else:
-                plt.scatter(df[viz.x_axis], df[viz.y_axis])
-        
-        elif viz.chart_type == 'pie':
-            if viz.color_by:
-                df.groupby(viz.color_by)[viz.y_axis].sum().plot(kind='pie', autopct='%1.1f%%')
-            else:
-                df.groupby(viz.x_axis)[viz.y_axis].sum().plot(kind='pie', autopct='%1.1f%%')
-        
-        elif viz.chart_type == 'histogram':
-            plt.hist(df[viz.x_axis], bins=30)
-        
-        plt.title(viz.name)
-        if viz.chart_type != 'pie':
-            plt.xlabel(viz.x_axis)
-            plt.ylabel(viz.y_axis if viz.y_axis else 'Count')
-        
-        # Save to BytesIO
-        img = io.BytesIO()
-        plt.savefig(img, format='png', dpi=300, bbox_inches='tight')
-        img.seek(0)
-        plt.close()
-        
-        return send_file(
-            img,
-            mimetype='image/png',
-            as_attachment=True,
-            download_name=f"{viz.name}.png"
-        )
-    
-    except Exception as e:
-        flash(f'Error exporting visualization: {str(e)}')
-        return redirect(url_for('dashboard'))
+app = create_app()
 
 if __name__ == '__main__':
-    with app.app_context():
-        # Create tables if they don't exist
-        db.create_all()
-        
-        # Check if last_login column exists in User table
-        inspector = db.inspect(db.engine)
-        columns = [col['name'] for col in inspector.get_columns('user')]
-        
-        if 'last_login' not in columns:
-            # Add last_login column to User table
-            with db.engine.connect() as conn:
-                conn.execute(db.text('ALTER TABLE user ADD COLUMN last_login DATETIME'))
-                conn.commit()
-            print("Added last_login column to User table")
-            
-    app.run(debug=True) 
+    app.run(debug=os.environ.get('FLASK_DEBUG') == '1',
+            host=os.environ.get('HOST', '127.0.0.1'),
+            port=int(os.environ.get('PORT', '5000')))
